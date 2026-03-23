@@ -31,6 +31,8 @@ extern "C" {
 typedef struct _tMouse {
 	UWORD uwX;
 	UWORD uwY;
+	BYTE bDeltaX;
+	BYTE bDeltaY;
 	UBYTE pButtonStates[3];
 	tUwAbsRect sBounds; ///< Min/max mouse position.
 #ifdef AMIGA
@@ -100,6 +102,10 @@ static inline UWORD mouseGetX(UBYTE ubMousePort) {
 	return g_sMouseManager.pMice[ubMousePort].uwX;
 }
 
+static inline WORD mouseGetDeltaX(UBYTE ubMousePort) {
+	return g_sMouseManager.pMice[ubMousePort].bDeltaX;
+}
+
 /**
  * Returns given mouse's current Y position.
  * @param ubMousePort: Mouse to be polled. Use one of MOUSE_PORT_* values.
@@ -107,6 +113,10 @@ static inline UWORD mouseGetX(UBYTE ubMousePort) {
  */
 static inline UWORD mouseGetY(UBYTE ubMousePort) {
 	return g_sMouseManager.pMice[ubMousePort].uwY;
+}
+
+static inline WORD mouseGetDeltaY(UBYTE ubMousePort) {
+	return g_sMouseManager.pMice[ubMousePort].bDeltaY;
 }
 
 /**

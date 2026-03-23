@@ -26,6 +26,8 @@ tCopperUlong FAR REGPTR g_pCop2Lc = (tCopperUlong REGPTR)(
 
 tCia FAR REGPTR g_pCia[CIA_COUNT] = {(tCia*)0xBFE001, (tCia*)0xBFD000};
 
+volatile ULONG g_ulFrameCounter = 0;
+
 UWORD ciaGetTimerA(tCia REGPTR pCia) {
 	UBYTE ubHi, ubLo;
 	do {

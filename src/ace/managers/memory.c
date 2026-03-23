@@ -49,12 +49,6 @@ static void _memEntryAdd(
 	s_pMemTail->uwId = s_uwLastId++;
 	s_pMemTail->pNext = pNext;
 
-	logWrite(
-		"[MEM] Allocated %s memory %hu@%p, size %lu (%s:%u)\n",
-		(memType(pAddr) & MEMF_CHIP) ? "CHIP" : "FAST",
-		s_pMemTail->uwId, pAddr, ulSize, szFile, uwLine
-	);
-
 	// Update mem usage counter
 	if(memType(pAddr) & MEMF_CHIP) {
 		s_ulChipUsage += ulSize;
@@ -68,6 +62,11 @@ static void _memEntryAdd(
 			s_ulFastPeakUsage = s_ulFastUsage;
 		}
 	}
+	logWrite(
+		"[MEM] Allocated %s memory %hu@%p, size %lu (Used CHIP=%lu FAST=%lu, Avail CHIP=%lu FAST=%lu) (%s:%u)\n",
+		(memType(pAddr) & MEMF_CHIP) ? "CHIP" : "FAST",
+		s_pMemTail->uwId, pAddr, ulSize, s_ulChipUsage, s_ulFastUsage, AvailMem(MEMF_CHIP), AvailMem(MEMF_FAST), szFile, uwLine
+	);
 	systemUnuse();
 }
 
@@ -175,6 +174,19 @@ void _memDestroy(void) {
 	);
 	systemUnuse();
 }
+#ifdef ACE_DEBUG
+void _memListAllocationsDbg(void) {
+	systemUse();
+	logWrite("[ACEMEM] UsedCHIP=%lu UsedFAST=%lu\n", s_ulChipUsage, s_ulFastUsage);
+	tMemEntry* pEntry = s_pMemTail;
+	logWrite("--- LIST OF ACE ALLOCATIONS ---");
+	while(pEntry) {
+		logWrite("  [ENTRY] %hu@%p: %lu\n", pEntry->uwId, pEntry->pAddr, pEntry->ulSize);
+		pEntry = pEntry->pNext;
+	}
+	systemUnuse();	
+}
+#endif
 
 void *_memAllocDbg(
 	ULONG ulSize, ULONG ulFlags, UWORD uwLine, const char *szFile
@@ -191,10 +203,17 @@ void *_memAllocDbg(
 			ulSize, szFile, uwLine
 		);
 		memLogPeak();
+#ifdef ACE_DEBUG
+		_memListAllocationsDbg();
+#endif
 #ifdef AMIGA
 		logWrite(
 			"[MEM] Largest available chunk of given type: %lu\n",
 			AvailMem(ulFlags | MEMF_LARGEST)
+		);
+		logWrite(
+			"[MEM] Available memory: %lu\n",
+			AvailMem(MEMF_CHIP)
 		);
 #endif // AMIGA
 		return 0;
@@ -282,10 +301,19 @@ UBYTE memType(const void *pMem) {
 #endif // AMIGA
 }
 
-ULONG memGetFreeChipSize(void) {
+ULONG memGetChipSize(void) {
 	return AvailMem(MEMF_CHIP);
 }
 
-ULONG memGetFreeSize(void) {
-	return AvailMem(MEMF_ANY);
+ULONG memGetFastSize(void) {
+	return AvailMem(MEMF_FAST);
 }
+
+ULONG memGetChipSizeLargest(void) {
+	return AvailMem(MEMF_CHIP | MEMF_LARGEST);
+}
+
+ULONG memGetFastSizeLargest(void) {
+	return AvailMem(MEMF_FAST | MEMF_LARGEST);
+}
+

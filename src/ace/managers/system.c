@@ -26,6 +26,22 @@
 #if defined(BARTMAN_GCC)
 #include <bartman/gcc8_c_support.h> // Idle measurement
 #endif
+#include <libraries/lowlevel.h>
+#include <proto/lowlevel.h>
+
+// Keep LowLevelBase open exclusively for ReadJoyPort() gamepad reading
+struct Library *LowLevelBase = NULL;
+
+#define blitWaitFast() ({ \
+    __asm__ volatile ( \
+            "tst.w 0xdff002\n\t" /* Dummy read to stall 060 and let Agnus assert BBUSY */ \
+            "1: btst #6, 0xdff002\n\t" \
+            "   bne.s 1b"            \
+            : /* no outputs */ \
+            : /* no inputs */ \
+            : "cc", "memory" /* <--- THE CRITICAL FIX */ \
+        ); \
+    })
 
 // There are hardware interrupt vectors
 // Some may be triggered by more than one event - there are 15 events
@@ -60,31 +76,31 @@ typedef struct _tAceInterrupt {
 // Store VBR query code in .text so that it plays nice with instruction cache
 // TODO: move to .s file after vasm support gets merged into cmake
 // Instructions: movec vbr,d0; rte
-__attribute__((section("text")))
+__attribute__((used, section("text"), aligned(4)))
 static const UWORD s_pGetVbrCode[] = {0x4e7a, 0x0801, 0x4e73};
 
 // Get cache control register contents (020+).
 // Instructions: movec cacr,d0; rte
-__attribute__((section("text")))
+__attribute__((used, section("text"), aligned(4)))
 static const UWORD s_pGetCacr[] = {0x4e7a, 0x0002, 0x4e73};
 
 // Get processor configuration register contents (060+).
 // Instructions: movec pcr,d0; rte
-__attribute__((section("text")))
+__attribute__((used, section("text"), aligned(4)))
 static const UWORD s_pGetPcr[] = {0x4e7a, 0x0801, 0x4e73};
 
 // Move d0 into the cache control register
 // movec d0,cacr; rte
-__attribute__((section("text")))
+__attribute__((used, section("text"), aligned(4)))
 static const UWORD s_pSetCacr[] = {0x4e7b, 0x0002, 0x4e73};
 
 // Move d0 into the cache control register and flush caches
 // movec d0,cacr; cpusha ic+dc; rte
-__attribute__((section("text")))
+__attribute__((used, section("text"), aligned(4)))
 static const UWORD s_pSetCacr040[] = {0x4e7b, 0x0002, 0xf4f8, 0x4e73};
 
 // Move d0 into the processor configuration register
-__attribute__((section("text")))
+__attribute__((used, section("text"), aligned(4)))
 static const UWORD s_pSetPcr[] = {0x4e7b, 0x801, 0x4e73};
 
 // Saved regs
@@ -101,6 +117,9 @@ static UWORD s_pAceCiaTimerA[CIA_COUNT] = {0xFFFF, 0xFFFF}; // as long as possib
 static UWORD s_pAceCiaTimerB[CIA_COUNT] = {0xFFFF, 0xFFFF};
 static UBYTE s_pAceCiaCra[CIA_COUNT] = {0, 0};
 static UBYTE s_pAceCiaCrb[CIA_COUNT] = {0, 0};
+
+// CD Device
+static UBYTE s_isCdDeviceOpen = 0;
 
 // Interrupts
 static void HWINTERRUPT int1Handler(void);
@@ -161,6 +180,9 @@ extern struct WBStartup *_WBenchMsg;
 
 static BPTR s_bpStartLock = 0;
 static void *s_pOldWindow;
+
+void (*s_cbOnSystemUse)(void) = 0;
+void (*s_cbOnSystemUnuse)(void) = 0;
 
 //----------------------------------------------------------- INTERRUPT HANDLERS
 
@@ -241,7 +263,7 @@ void HWINTERRUPT int3Handler(void) {
 	// Copper
 	if((uwIntReq & INTF_COPER) && s_pAceInterrupts[INTB_COPER].pHandler) {
 		s_pAceInterrupts[INTB_COPER].pHandler(
-			g_pCustom, s_pAceInterrupts[INTB_VERTB].pData
+			g_pCustom, s_pAceInterrupts[INTB_COPER].pData 
 		);
 		uwReqClr |= INTF_COPER;
 	}
@@ -249,13 +271,17 @@ void HWINTERRUPT int3Handler(void) {
 	// Blitter
 	if((uwIntReq & INTF_BLIT) && s_pAceInterrupts[INTB_BLIT].pHandler) {
 		s_pAceInterrupts[INTB_BLIT].pHandler(
-			g_pCustom, s_pAceInterrupts[INTB_VERTB].pData
+			g_pCustom, s_pAceInterrupts[INTB_BLIT].pData 
 		);
 		uwReqClr |= INTF_BLIT;
 	}
 	logPopInt();
 	g_pCustom->intreq = uwReqClr;
 	g_pCustom->intreq = uwReqClr;
+
+	if(uwReqClr & INTF_VERTB) {
+		g_ulFrameCounter++;
+	}
 }
 
 FN_HOTSPOT
@@ -554,7 +580,7 @@ static void audioChannelFree(void) {
 }
 
 static void cdtvCdCommand(UWORD cmd) {
-	if (s_pCdtvIOReq) {
+	if (s_isCdDeviceOpen && s_pCdtvIOReq) {
 		s_pCdtvIOReq->io_Command = cmd;
 		s_pCdtvIOReq->io_Offset  = 0;
 		s_pCdtvIOReq->io_Length  = 0;
@@ -576,21 +602,36 @@ static void cdtvPortAlloc(void) {
 		return;
 	}
 
-	if (OpenDevice((CONST_STRPTR)"cdtv.device", 0, (struct IORequest *) s_pCdtvIOReq, 0)) {
-		msgPortDelete(s_pCdtvIOPort);
-		s_pCdtvIOPort = NULL;
-		ioRequestDestroy((struct IORequest*)s_pCdtvIOReq);
-		s_pCdtvIOReq = NULL;
+	if (OpenDevice((CONST_STRPTR)"cd.device", 0, (struct IORequest *) s_pCdtvIOReq, 0) == 0) {
+		s_isCdDeviceOpen = 1;
 		return;
 	}
+
+	if (OpenDevice((CONST_STRPTR)"cdtv.device", 0, (struct IORequest *) s_pCdtvIOReq, 0) == 0) {
+		s_isCdDeviceOpen = 1;
+		return;
+	}
+
+	msgPortDelete(s_pCdtvIOPort);
+	s_pCdtvIOPort = NULL;
+	ioRequestDestroy((struct IORequest*)s_pCdtvIOReq);
+	s_pCdtvIOReq = NULL;
 }
 
 static void cdtvPortFree(void) {
+	if (s_isCdDeviceOpen && s_pCdtvIOReq) {
+		CloseDevice((struct IORequest *)s_pCdtvIOReq);
+		s_isCdDeviceOpen = 0;
+	}
+
 	if (s_pCdtvIOPort) {
 		msgPortDelete(s_pCdtvIOPort);
+		s_pCdtvIOPort = NULL;
 	}
+
 	if (s_pCdtvIOReq) {
 		ioRequestDestroy((struct IORequest *)s_pCdtvIOReq);
+		s_pCdtvIOReq = NULL;
 	}
 }
 
@@ -700,75 +741,88 @@ static void interruptHandlerRemove(UBYTE ubIntBit) {
 }
 
 static void systemOsDisable(void) {
-		// Disable interrupts (this is the actual "kill system/OS" part)
-		g_pCustom->intena = 0x7FFF;
-		g_pCustom->intreq = 0x7FFF;
+	// 1. Safely park the CD-ROM drive ONLY if it's open
+	if (s_isCdDeviceOpen) {
+		cdtvCdCommand(CMD_STOP);
+		// Give cd.device time to spin down
+		UWORD frameCount = systemIsPal() ? 12 : 15;
+		for(UWORD i = 0; i < frameCount; ++i) {
+			WaitTOF();
+		} 
+	}
 
-		// Query CIA ICR bits set by OS for later CIA takeover restore
-		s_pOsCiaIcr[CIA_A] = AbleICR(s_pCiaResource[CIA_A], 0);
-		s_pOsCiaIcr[CIA_B] = AbleICR(s_pCiaResource[CIA_B], 0);
+	// --- CRITICAL ZONE: Stop OS Multitasking ---
+	Forbid();
 
-		// Disable CIA interrupts
-		g_pCia[CIA_A]->icr = 0x7F;
-		g_pCia[CIA_B]->icr = 0x7F;
+	// Disable interrupts (this is the actual "kill system/OS" part)
+	g_pCustom->intena = 0x7FFF;
+	g_pCustom->intreq = 0x7FFF;
 
-		// Save CRA bits
-		s_pOsCiaCra[CIA_A] = g_pCia[CIA_A]->cra;
-		s_pOsCiaCrb[CIA_A] = g_pCia[CIA_A]->crb;
-		s_pOsCiaCra[CIA_B] = g_pCia[CIA_B]->cra;
-		s_pOsCiaCrb[CIA_B] = g_pCia[CIA_B]->crb;
+	// Query CIA ICR bits set by OS for later CIA takeover restore
+	s_pOsCiaIcr[CIA_A] = AbleICR(s_pCiaResource[CIA_A], 0);
+	s_pOsCiaIcr[CIA_B] = AbleICR(s_pCiaResource[CIA_B], 0);
 
-		// Disable timers and trigger reload of value to read preset val
-		g_pCia[CIA_A]->cra = CIACRA_LOAD; // CIACRA_START=0, timer is stopped
-		g_pCia[CIA_A]->crb = CIACRB_LOAD;
-		g_pCia[CIA_B]->cra = CIACRA_LOAD; // CIACRA_START=0, timer is stopped
-		g_pCia[CIA_B]->crb = CIACRB_LOAD;
+	// Disable CIA interrupts
+	g_pCia[CIA_A]->icr = 0x7F;
+	g_pCia[CIA_B]->icr = 0x7F;
 
-		// Save OS CIA timer values
-		s_uwOsCiaATimerA = ciaGetTimerA(g_pCia[CIA_A]);
-		s_uwOsCiaBTimerB = ciaGetTimerB(g_pCia[CIA_A]);
+	// Save CRA bits
+	s_pOsCiaCra[CIA_A] = g_pCia[CIA_A]->cra;
+	s_pOsCiaCrb[CIA_A] = g_pCia[CIA_A]->crb;
+	s_pOsCiaCra[CIA_B] = g_pCia[CIA_B]->cra;
+	s_pOsCiaCrb[CIA_B] = g_pCia[CIA_B]->crb;
 
-		// set ACE CIA timers
-		ciaSetTimerA(g_pCia[CIA_A], s_pAceCiaTimerA[CIA_A]);
-		ciaSetTimerB(g_pCia[CIA_A], s_pAceCiaTimerB[CIA_A]);
-		ciaSetTimerA(g_pCia[CIA_B], s_pAceCiaTimerA[CIA_B]);
-		ciaSetTimerB(g_pCia[CIA_B], s_pAceCiaTimerB[CIA_B]);
+	// Disable timers and trigger reload of value to read preset val
+	g_pCia[CIA_A]->cra = CIACRA_LOAD; // CIACRA_START=0, timer is stopped
+	g_pCia[CIA_A]->crb = CIACRB_LOAD;
+	g_pCia[CIA_B]->cra = CIACRA_LOAD; // CIACRA_START=0, timer is stopped
+	g_pCia[CIA_B]->crb = CIACRB_LOAD;
 
-		// Enable ACE CIA interrupts
-		g_pCia[CIA_A]->icr = (
-			CIAICRF_SETCLR | CIAICRF_SERIAL | CIAICRF_TIMER_A | CIAICRF_TIMER_B
-		);
-		g_pCia[CIA_B]->icr = (
-			CIAICRF_SETCLR | CIAICRF_SERIAL | CIAICRF_TIMER_A | CIAICRF_TIMER_B
-		);
+	// Save OS CIA timer values
+	s_uwOsCiaATimerA = ciaGetTimerA(g_pCia[CIA_A]);
+	s_uwOsCiaBTimerB = ciaGetTimerB(g_pCia[CIA_A]);
 
-		// Restore ACE CIA CRA/CRB state
-		g_pCia[CIA_A]->cra = CIACRA_LOAD | s_pAceCiaCra[CIA_A];
-		g_pCia[CIA_A]->crb = CIACRA_LOAD | s_pAceCiaCrb[CIA_A];
-		g_pCia[CIA_B]->cra = CIACRA_LOAD | s_pAceCiaCra[CIA_B];
-		g_pCia[CIA_B]->crb = CIACRA_LOAD | s_pAceCiaCrb[CIA_B];
+	// set ACE CIA timers
+	ciaSetTimerA(g_pCia[CIA_A], s_pAceCiaTimerA[CIA_A]);
+	ciaSetTimerB(g_pCia[CIA_A], s_pAceCiaTimerB[CIA_A]);
+	ciaSetTimerA(g_pCia[CIA_B], s_pAceCiaTimerA[CIA_B]);
+	ciaSetTimerB(g_pCia[CIA_B], s_pAceCiaTimerB[CIA_B]);
 
-		// Game's bitplanes & copperlists are still used so don't disable them
-		// Wait for vbl before disabling sprite DMA
-		while (!(g_pCustom->intreqr & INTF_VERTB)) continue;
-		g_pCustom->dmacon = s_uwOsMinDma;
+	// Enable ACE CIA interrupts
+	g_pCia[CIA_A]->icr = (
+		CIAICRF_SETCLR | CIAICRF_SERIAL | CIAICRF_TIMER_A | CIAICRF_TIMER_B
+	);
+	g_pCia[CIA_B]->icr = (
+		CIAICRF_SETCLR | CIAICRF_SERIAL | CIAICRF_TIMER_A | CIAICRF_TIMER_B
+	);
 
-		// Save OS interrupt vectors and enable ACE's
-		g_pCustom->intreq = 0x7FFF;
-		for(UWORD i = 0; i < SYSTEM_INT_VECTOR_COUNT; ++i) {
-			s_pOsHwInterrupts[i] = s_pHwVectors[SYSTEM_INT_VECTOR_FIRST + i];
-			s_pHwVectors[SYSTEM_INT_VECTOR_FIRST + i] = s_pAceHwInterrupts[i];
-		}
+	// Restore ACE CIA CRA/CRB state
+	g_pCia[CIA_A]->cra = CIACRA_LOAD | s_pAceCiaCra[CIA_A];
+	g_pCia[CIA_A]->crb = CIACRA_LOAD | s_pAceCiaCrb[CIA_A];
+	g_pCia[CIA_B]->cra = CIACRA_LOAD | s_pAceCiaCra[CIA_B];
+	g_pCia[CIA_B]->crb = CIACRA_LOAD | s_pAceCiaCrb[CIA_B];
 
-		// Enable needed DMA (and interrupt) channels
-		g_pCustom->dmacon = DMAF_SETCLR | DMAF_MASTER | s_uwAceDmaCon;
-		g_pCustom->intena = INTF_SETCLR | INTF_INTEN | s_uwAceIntEna | SYSTEM_ACE_MIN_NO_OS_INTERRUPTS;
+	// Game's bitplanes & copperlists are still used so don't disable them
+	// Wait for vbl before disabling sprite DMA
+	while (!(g_pCustom->intreqr & INTF_VERTB)) continue;
+	g_pCustom->dmacon = s_uwOsMinDma;
 
-		// HACK: OS resets potgo in vblank int, preventing scanning fire2 on most joysticks.
-		// TODO: make sure this doesn't break anything, e.g. mice
-		// TODO: add setting this value to OS-friendly vblank handler with proper priority
-		// https://eab.abime.net/showthread.php?t=74981
-		g_pCustom->potgo = 0xFF00;
+	// Save OS interrupt vectors and enable ACE's
+	g_pCustom->intreq = 0x7FFF;
+	for(UWORD i = 0; i < SYSTEM_INT_VECTOR_COUNT; ++i) {
+		s_pOsHwInterrupts[i] = s_pHwVectors[SYSTEM_INT_VECTOR_FIRST + i];
+		s_pHwVectors[SYSTEM_INT_VECTOR_FIRST + i] = s_pAceHwInterrupts[i];
+	}
+
+	// Enable needed DMA (and interrupt) channels
+	g_pCustom->dmacon = DMAF_SETCLR | DMAF_MASTER | s_uwAceDmaCon;
+	g_pCustom->intena = INTF_SETCLR | INTF_INTEN | s_uwAceIntEna | SYSTEM_ACE_MIN_NO_OS_INTERRUPTS;
+
+	// HACK: OS resets potgo in vblank int, preventing scanning fire2 on most joysticks.
+	// TODO: make sure this doesn't break anything, e.g. mice
+	// TODO: add setting this value to OS-friendly vblank handler with proper priority
+	// https://eab.abime.net/showthread.php?t=74981
+	g_pCustom->potgo = 0xFF00;
 }
 
 void ciaIcrHandlerAdd(UBYTE ubCia, UBYTE ubIcrBit) {
@@ -858,10 +912,13 @@ void systemKill(const char *szMsg) {
 	if(DOSBase) {
 		CloseLibrary((struct Library *) DOSBase);
 	}
+	if(LowLevelBase) {
+		CloseLibrary(LowLevelBase);
+	}
 	exit(EXIT_FAILURE);
 }
 
-void systemCreate(void) {
+void systemCreate(UBYTE isFloppyBoot) {
 #if defined(BARTMAN_GCC)
 	// Bartman's startup code doesn't initialize anything
 	SysBase = *((struct ExecBase**)4UL);
@@ -879,9 +936,12 @@ void systemCreate(void) {
 		return;
 	}
 
+	// Open the library exclusively for access to ReadJoyPort() later
+	LowLevelBase = OpenLibrary((CONST_STRPTR)"lowlevel.library", 0L);
+
 	s_pProcess = (struct Process *)FindTask(NULL);
 #if defined(BARTMAN_GCC)
-	if(!s_pProcess->pr_CLI) {
+	if(!s_pProcess->pr_CLI && !isFloppyBoot) {
 		// Called from the workbench - get the message for later reply
 		// Taken from https://github.com/alpine9000/EWGM/blob/master/game/wbstartup.i
 		WaitPort(&s_pProcess->pr_MsgPort); // Wait for the message
@@ -942,6 +1002,11 @@ void systemCreate(void) {
 	WaitTOF();
 	WaitTOF(); // Wait for interlaced screen to finish
 
+	// Workbench often leaves BPLCON3 in a high-res state. 
+	// Writing 0x0C00 resets it to the standard Lores sprite format.
+	// (This write is safely ignored by older OCS Agnus chips).
+	g_pCustom->bplcon3 = 0x0C00;
+
 	// get VBR location on 68010+ machine
 	// http://eab.abime.net/showthread.php?t=65430&page=3
 	if (SysBase->AttnFlags & AFF_68010) {
@@ -998,14 +1063,21 @@ void systemCreate(void) {
 	systemGetBlitterFromOs();
 }
 
-void systemDestroy(void) {
+void systemDestroy(UBYTE isFloppyBoot) {
+	blitWaitFast();
+
 	// Disable all interrupts
 	g_pCustom->intena = 0x7FFF;
 	g_pCustom->intreq = 0x7FFF;
 
+	volatile UWORD dummy = g_pCustom->intreqr;
+	(void)dummy;
+
 	// Wait for vbl before disabling sprite DMA
 	while (!(g_pCustom->intreqr & INTF_VERTB)) continue;
-	g_pCustom->dmacon = 0x07FF;
+	
+	// FIX: Ensure bits 11-14 are killed by using 0x7FFF instead of 0x07FF
+	g_pCustom->dmacon = 0x7FFF;
 	g_pCustom->intreq = 0x7FFF;
 
 	if(s_sCpuCacheFlags.wDisabledCount != 0) {
@@ -1061,9 +1133,12 @@ void systemDestroy(void) {
 	CloseLibrary((struct Library *) GfxBase);
 	logWrite("Closing dos.library...\n");
 	CloseLibrary((struct Library *) DOSBase);
+	if (LowLevelBase) {
+		CloseLibrary(LowLevelBase);
+	}
 
 #if defined(BARTMAN_GCC)
-	if(s_pReturnMsg) {
+	if(s_pReturnMsg && !isFloppyBoot) {
 		ReplyMsg(s_pReturnMsg);
 	}
 #endif
@@ -1086,13 +1161,12 @@ void systemUnuse(void) {
 			systemFlushIo();
 		}
 
-		// Disable CDTV CD drive if present
-		cdtvCdCommand(CMD_STOP);
-
 		// save the state of the hardware registers (INTENA)
 		s_uwOsIntEna = g_pCustom->intenar;
 
 		systemOsDisable();
+
+		if (s_cbOnSystemUnuse) s_cbOnSystemUnuse();
 	}
 #if defined(ACE_DEBUG)
 	if(s_wSystemUses < 0) {
@@ -1104,9 +1178,17 @@ void systemUnuse(void) {
 
 void systemUse(void) {
 	if(!s_wSystemUses) {
+		if (s_cbOnSystemUse) s_cbOnSystemUse();
+
+		blitWaitFast();
+
 		// Disable app interrupts/dma, keep display-related DMA
 		g_pCustom->intena = 0x7FFF;
 		g_pCustom->intreq = 0x7FFF;
+		
+		volatile UWORD dummy = g_pCustom->intreqr;
+		(void)dummy;
+
 		g_pCustom->dmacon = s_uwOsMinDma;
 		while(!(g_pCustom->intreqr & INTF_VERTB)) continue;
 
@@ -1149,8 +1231,13 @@ void systemUse(void) {
 		// inactive, we won't be able to catch it.
 		keyReset();
 
+		// --- END CRITICAL ZONE: Resume OS Multitasking ---
+		Permit();
+
 		// Re-enable CDTV CD drive if present
-		cdtvCdCommand(CMD_START);
+		if (s_isCdDeviceOpen) {
+			cdtvCdCommand(CMD_START);
+		}
 	}
 	++s_wSystemUses;
 
@@ -1417,3 +1504,5 @@ void systemRestoreCpuCaches() {
 		Supervisor((void *)s_pSetPcr);
 	}
 }
+
+volatile void* systemGetVbrBase() { return s_pHwVectors; }

@@ -42,9 +42,9 @@ typedef int32_t LONG;
 #if defined(__CODE_CHECKER__) || defined(__INTELLISENSE__)
 // My realtime source checker has problems with GCC asm() expanded from REGARG()
 // being in fn arg list, so I just use blank defines for it
-#define INTERRUPT
+#define INTERRUPT __attribute__((used))
 #define INTERRUPT_END do {} while(0)
-#define HWINTERRUPT
+#define HWINTERRUPT __attribute__((used))
 #define UNUSED_ARG __attribute__((unused))
 #define REGARG(arg, reg) arg
 #define CHIP

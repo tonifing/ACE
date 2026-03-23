@@ -31,14 +31,14 @@ typedef void (*tKeyInputHandler)(UBYTE ubRawKeyCode);
  * but leaves it in enabled state.
  * This is the first thing you should call in your ACE app.
  */
-void systemCreate(void);
+void systemCreate(UBYTE isFloppyBoot);
 
 /**
  * @brief Cleans up after app, restores anything that systemCreate took over.
  * After running the function, the system to its state before running your app.
  * This is the last thing you should call in your ACE app.
  */
-void systemDestroy(void);
+void systemDestroy(UBYTE isFloppyBoot);
 
 void systemKill(const char *szMsg);
 
@@ -114,6 +114,21 @@ void systemRestoreCpuCaches();
 //---------------------------------------------------------------------- GLOBALS
 
 extern struct GfxBase *GfxBase;
+
+extern void (*s_cbOnSystemUse)(void);
+extern void (*s_cbOnSystemUnuse)(void);
+
+extern volatile ULONG g_ulFrameCounter;
+
+inline void systemSetUseCallback(void (*cb)(void)) {
+    s_cbOnSystemUse = cb;
+}
+
+inline void systemSetUnuseCallback(void (*cb)(void)) {
+    s_cbOnSystemUnuse = cb;
+}
+
+volatile void* systemGetVbrBase();
 
 #ifdef __cplusplus
 }

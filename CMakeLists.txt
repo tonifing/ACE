@@ -30,6 +30,11 @@ if(NOT AMIGA)
 	message(SEND_ERROR "[ACE] This project only compiles for Amiga")
 endif()
 
+if(NOT "${M68K_CPU}" STREQUAL "68000")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -msoft-float -fno-optimize-sibling-calls")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msoft-float -fno-optimize-sibling-calls")
+endif()
+
 file(GLOB_RECURSE SOURCES src/ace/*.c src/fixmath/*.c)
 file(GLOB HEADERS_ACE include/ace/*.h)
 file(GLOB HEADERS_ACE_GENERIC include/ace/generic/*.h)
@@ -54,6 +59,16 @@ set(CMAKE_C_STANDARD 11)
 target_compile_definitions(${TARGET_NAME} PUBLIC AMIGA)
 target_compile_options(${TARGET_NAME} PRIVATE $<$<OR:$<COMPILE_LANGUAGE:CXX>,$<COMPILE_LANGUAGE:C>>:-Wall -Wextra>)
 target_compile_options(${TARGET_NAME} PUBLIC $<$<OR:$<COMPILE_LANGUAGE:CXX>,$<COMPILE_LANGUAGE:C>>:-fomit-frame-pointer>)
+target_compile_options(ace PRIVATE
+    -Os 
+    -fomit-frame-pointer
+    -ffunction-sections 
+    -fdata-sections
+    -fno-ident
+    -fno-math-errno
+    -flto
+    -ffat-lto-objects 
+)
 
 if(ACE_DEBUG)
 	target_compile_definitions(${TARGET_NAME} PUBLIC ACE_DEBUG)

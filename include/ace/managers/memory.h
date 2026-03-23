@@ -40,9 +40,10 @@ extern "C" {
  */
 UBYTE memType(const void *pMem);
 
-ULONG memGetFreeChipSize(void);
-
-ULONG memGetFreeSize(void);
+ULONG memGetChipSize(void);
+ULONG memGetFastSize(void);
+ULONG memGetChipSizeLargest(void);
+ULONG memGetFastSizeLargest(void);
 
 void _memCreate(void);
 void _memDestroy(void);
@@ -87,6 +88,10 @@ void _memLogPeak(void);
 #define memAllocChipClear(ulSize) memAlloc(ulSize, MEMF_CHIP | MEMF_CLEAR)
 #define memAllocChipFlags(ulSize, ulFlags) memAlloc(ulSize, MEMF_CHIP | ulFlags)
 #define memAllocFastFlags(ulSize, ulFlags) memAlloc(ulSize, MEMF_ANY |ulFlags)
+
+#ifdef ACE_DEBUG
+void _memListAllocationsDbg(void);
+#endif
 
 #ifdef __cplusplus
 }

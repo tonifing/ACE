@@ -69,6 +69,9 @@ static void mouseProcessPort(
 	g_sMouseManager.pMice[ubPort].ubPrevHwX = ubPosX;
 	g_sMouseManager.pMice[ubPort].ubPrevHwY = ubPosY;
 
+	g_sMouseManager.pMice[ubPort].bDeltaX = bDx;
+	g_sMouseManager.pMice[ubPort].bDeltaY = bDy;
+
 	// Left button state
 	if(ubStateLmb) {
 		mouseSetButton(ubPort, MOUSE_LMB, MOUSE_NACTIVE);
